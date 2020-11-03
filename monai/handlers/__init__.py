@@ -16,10 +16,11 @@ from .confusion_matrix import ConfusionMatrix
 from .lr_schedule_handler import LrScheduleHandler
 from .mean_dice import MeanDice
 from .metric_logger import MetricLogger
+from .connected_components import ConnectedComponent
 from .roc_auc import ROCAUC
 from .segmentation_saver import SegmentationSaver
 from .smartcache_handler import SmartCacheHandler
-from .stats_handler import StatsHandler
+from .stats_handler import StatsHandler, WVVStatsHandler
 from .tensorboard_handlers import TensorBoardImageHandler, TensorBoardStatsHandler
 from .utils import *
 from .validation_handler import ValidationHandler

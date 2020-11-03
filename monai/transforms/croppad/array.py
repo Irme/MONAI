@@ -16,6 +16,8 @@ https://github.com/Project-MONAI/MONAI/wiki/MONAI_Design
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+from skimage import measure
+import scipy
 
 from monai.config import IndexSelection
 from monai.data.utils import get_random_patch, get_valid_patch_size
@@ -579,3 +581,157 @@ class ResizeWithPadOrCrop(Transform):
                 See also: https://numpy.org/doc/1.18/reference/generated/numpy.pad.html
         """
         return self.padder(self.cropper(img), mode=mode)
+
+class CMBOffsetCrop(Randomizable, Transform):
+    """
+    Crop random fixed sized regions with the center being a foreground or background voxel
+    based on the Pos Neg Ratio.
+    And will return a list of arrays for all the cropped images.
+    For example, crop two (3 x 3) arrays from (5 x 5) array with pos/neg=1::
+
+        [[[0, 0, 0, 0, 0],
+          [0, 1, 2, 1, 0],            [[0, 1, 2],     [[2, 1, 0],
+          [0, 1, 3, 0, 0],     -->     [0, 1, 3],      [3, 0, 0],
+          [0, 0, 0, 0, 0],             [0, 0, 0]]      [0, 0, 0]]
+          [0, 0, 0, 0, 0]]]
+
+    Args:
+        spatial_size: the spatial size of the crop region e.g. [224, 224, 128].
+            If its components have non-positive values, the corresponding size of `label` will be used.
+        label: the label image that is used for finding foreground/background, if None, must set at
+            `self.__call__`.  Non-zero indicates foreground, zero indicates background.
+        pos: used with `neg` together to calculate the ratio ``pos / (pos + neg)`` for the probability
+            to pick a foreground voxel as a center rather than a background voxel.
+        neg: used with `pos` together to calculate the ratio ``pos / (pos + neg)`` for the probability
+            to pick a foreground voxel as a center rather than a background voxel.
+        num_samples: number of samples (crop regions) to take in each list.
+        image: optional image data to help select valid area, can be same as `img` or another image array.
+            if not None, use ``label == 0 & image > image_threshold`` to select the negative
+            sample (background) center. So the crop center will only come from the valid image areas.
+        image_threshold: if enabled `image`, use ``image > image_threshold`` to determine
+            the valid image content areas.
+        fg_indices: if provided pre-computed foreground indices of `label`, will ignore above `image` and
+            `image_threshold`, and randomly select crop centers based on them, need to provide `fg_indices`
+            and `bg_indices` together, expect to be 1 dim array of spatial indices after flattening.
+            a typical usage is to call `FgBgToIndices` transform first and cache the results.
+        bg_indices: if provided pre-computed background indices of `label`, will ignore above `image` and
+            `image_threshold`, and randomly select crop centers based on them, need to provide `fg_indices`
+            and `bg_indices` together, expect to be 1 dim array of spatial indices after flattening.
+            a typical usage is to call `FgBgToIndices` transform first and cache the results.
+
+    Raises:
+        ValueError: When ``pos`` or ``neg`` are negative.
+        ValueError: When ``pos=0`` and ``neg=0``. Incompatible values.
+
+    """
+
+    def __init__(
+        self,
+        spatial_size: Union[Sequence[int], int],
+        label: Optional[np.ndarray] = None,
+        num_samples: int = 1,
+        image: Optional[np.ndarray] = None,
+        image_threshold: float = 0.0,
+        fg_indices: Optional[np.ndarray] = None,
+        bg_indices: Optional[np.ndarray] = None,
+    ) -> None:
+        self.spatial_size = ensure_tuple(spatial_size)
+        self.label = label
+        self.num_samples = num_samples
+        self.image = image
+        self.image_threshold = image_threshold
+        self.centers: Optional[List[List[np.ndarray]]] = None
+        self.fg_indices = fg_indices
+        self.bg_indices = bg_indices
+
+    def generate_list_cmb_centers(self,label,patch_size,offset_type='uniform'):
+        labelled_label, num = measure.label(input=label, return_num=True,
+                                            connectivity=2)
+        print("Found {} cmbs in image".format(num))
+        mass = scipy.ndimage.center_of_mass(label, labelled_label,
+                                            range(1, num + 1))
+        listofCenters = []
+        for (x, y, z) in mass:
+
+            if 'normal' in offset_type:
+                offset_x = np.clip(
+                    np.random.normal(0, np.rint(patch_size[0] / 10)),
+                    -(patch_size[0] / 2), (patch_size[0] / 2))
+                offset_y = np.clip(
+                    np.random.normal(0, np.rint(patch_size[1] / 10)),
+                    -(patch_size[1] / 2), (patch_size[1] / 2))
+                offset_z = np.clip(
+                    np.random.normal(0, np.rint(patch_size[2] / 10)),
+                    -(patch_size[2] / 2), (patch_size[2] / 2))
+            else:
+                offset_x = np.random.uniform(
+                    -np.rint(patch_size[0] / 2) + 1,
+                    np.rint(patch_size[0] / 2) - 1)
+                offset_y = np.random.uniform(
+                    -np.rint(patch_size[1] / 2) + 1,
+                    np.rint(patch_size[1] / 2) - 1)
+                offset_z = np.random.uniform(
+                    -np.rint(patch_size[2] / 2) + 1,
+                    np.rint(patch_size[2] / 2) - 1)
+            listofCenters.append(
+                [np.rint(x + offset_x), np.rint(y + offset_y),
+                 np.rint(z + offset_z)])
+
+
+
+        return listofCenters
+
+    def randomize(
+        self,
+        label: np.ndarray,
+        fg_indices: Optional[np.ndarray] = None,
+        bg_indices: Optional[np.ndarray] = None,
+        image: Optional[np.ndarray] = None,
+    ) -> None:
+        self.spatial_size = fall_back_tuple(self.spatial_size, default=label.shape[1:])
+        self.centers = self.generate_list_cmb_centers(self.label, self.spatial_size)
+
+    def __call__(
+        self,
+        img: np.ndarray,
+        label: Optional[np.ndarray] = None,
+        image: Optional[np.ndarray] = None,
+        fg_indices: Optional[np.ndarray] = None,
+        bg_indices: Optional[np.ndarray] = None,
+    ) -> List[np.ndarray]:
+        """
+        Args:
+            img: input data to crop samples from based on the pos/neg ratio of `label` and `image`.
+                Assumes `img` is a channel-first array.
+            label: the label image that is used for finding foreground/background, if None, use `self.label`.
+            image: optional image data to help select valid area, can be same as `img` or another image array.
+                use ``label == 0 & image > image_threshold`` to select the negative sample(background) center.
+                so the crop center will only exist on valid image area. if None, use `self.image`.
+            fg_indices: foreground indices to randomly select crop centers,
+                need to provide `fg_indices` and `bg_indices` together.
+            bg_indices: background indices to randomly select crop centers,
+                need to provide `fg_indices` and `bg_indices` together.
+
+        """
+        print("Generating cmb patches")
+        if label is None:
+            label = self.label
+            print("Setting label {}".format(self.label))
+        if image is None:
+            image = self.image
+        if fg_indices is None or bg_indices is None:
+            if self.fg_indices is not None and self.bg_indices is not None:
+                fg_indices = self.fg_indices
+                bg_indices = self.bg_indices
+            else:
+                fg_indices, bg_indices = map_binary_to_indices(label, image, self.image_threshold)
+        self.randomize(label, fg_indices, bg_indices, image)
+        results: List[np.ndarray] = list()
+
+        if self.centers is not None:
+            print(self.centers)
+            for center in self.centers:
+                cropper = SpatialCrop(roi_center=tuple(center), roi_size=self.spatial_size)
+                results.append(cropper(img))
+
+        return results

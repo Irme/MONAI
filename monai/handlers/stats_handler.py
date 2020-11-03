@@ -12,6 +12,7 @@
 import logging
 import warnings
 from typing import TYPE_CHECKING, Any, Callable, Optional
+import pandas as pd
 
 import torch
 
@@ -21,7 +22,8 @@ Events, _ = optional_import("ignite.engine", "0.4.2", exact_version, "Events")
 if TYPE_CHECKING:
     from ignite.engine import Engine
 else:
-    Engine, _ = optional_import("ignite.engine", "0.4.2", exact_version, "Engine")
+    Engine, _ = optional_import("ignite.engine", "0.4.2", exact_version,
+                                "Engine")
 
 DEFAULT_KEY_VAL_FORMAT = "{}: {:.4f} "
 DEFAULT_TAG = "Loss"
@@ -41,15 +43,15 @@ class StatsHandler(object):
     """
 
     def __init__(
-        self,
-        epoch_print_logger: Optional[Callable[[Engine], Any]] = None,
-        iteration_print_logger: Optional[Callable[[Engine], Any]] = None,
-        output_transform: Callable = lambda x: x,
-        global_epoch_transform: Callable = lambda x: x,
-        name: Optional[str] = None,
-        tag_name: str = DEFAULT_TAG,
-        key_var_format: str = DEFAULT_KEY_VAL_FORMAT,
-        logger_handler: Optional[logging.Handler] = None,
+            self,
+            epoch_print_logger: Optional[Callable[[Engine], Any]] = None,
+            iteration_print_logger: Optional[Callable[[Engine], Any]] = None,
+            output_transform: Callable = lambda x: x,
+            global_epoch_transform: Callable = lambda x: x,
+            name: Optional[str] = None,
+            tag_name: str = DEFAULT_TAG,
+            key_var_format: str = DEFAULT_KEY_VAL_FORMAT,
+            logger_handler: Optional[logging.Handler] = None,
     ) -> None:
         """
 
@@ -95,12 +97,18 @@ class StatsHandler(object):
         """
         if self._name is None:
             self.logger = engine.logger
-        if not engine.has_event_handler(self.iteration_completed, Events.ITERATION_COMPLETED):
-            engine.add_event_handler(Events.ITERATION_COMPLETED, self.iteration_completed)
-        if not engine.has_event_handler(self.epoch_completed, Events.EPOCH_COMPLETED):
-            engine.add_event_handler(Events.EPOCH_COMPLETED, self.epoch_completed)
-        if not engine.has_event_handler(self.exception_raised, Events.EXCEPTION_RAISED):
-            engine.add_event_handler(Events.EXCEPTION_RAISED, self.exception_raised)
+        if not engine.has_event_handler(self.iteration_completed,
+                                        Events.ITERATION_COMPLETED):
+            engine.add_event_handler(Events.ITERATION_COMPLETED,
+                                     self.iteration_completed)
+        if not engine.has_event_handler(self.epoch_completed,
+                                        Events.EPOCH_COMPLETED):
+            engine.add_event_handler(Events.EPOCH_COMPLETED,
+                                     self.epoch_completed)
+        if not engine.has_event_handler(self.exception_raised,
+                                        Events.EXCEPTION_RAISED):
+            engine.add_event_handler(Events.EXCEPTION_RAISED,
+                                     self.exception_raised)
 
     def epoch_completed(self, engine: Engine) -> None:
         """
@@ -157,7 +165,6 @@ class StatsHandler(object):
         if not prints_dict:
             return
         current_epoch = self.global_epoch_transform(engine.state.epoch)
-
         out_str = f"Epoch[{current_epoch}] Metrics -- "
         for name in sorted(prints_dict):
             value = prints_dict[name]
@@ -165,7 +172,8 @@ class StatsHandler(object):
         self.logger.info(out_str)
 
         if hasattr(engine.state, "key_metric_name"):
-            if hasattr(engine.state, "best_metric") and hasattr(engine.state, "best_metric_epoch"):
+            if hasattr(engine.state, "best_metric") and hasattr(engine.state,
+                                                                "best_metric_epoch"):
                 out_str = f"Key metric: {engine.state.key_metric_name} "
                 out_str += f"best value: {engine.state.best_metric} at epoch: {engine.state.best_metric_epoch}"
         self.logger.info(out_str)
@@ -196,10 +204,14 @@ class StatsHandler(object):
                         " {}:{}".format(name, type(value))
                     )
                     continue  # not printing multi dimensional output
-                out_str += self.key_var_format.format(name, value.item() if torch.is_tensor(value) else value)
+                out_str += self.key_var_format.format(name,
+                                                      value.item() if torch.is_tensor(
+                                                          value) else value)
         else:
             if is_scalar(loss):  # not printing multi dimensional output
-                out_str += self.key_var_format.format(self.tag_name, loss.item() if torch.is_tensor(loss) else loss)
+                out_str += self.key_var_format.format(self.tag_name,
+                                                      loss.item() if torch.is_tensor(
+                                                          loss) else loss)
             else:
                 warnings.warn(
                     "ignoring non-scalar output in StatsHandler,"
@@ -219,3 +231,94 @@ class StatsHandler(object):
         base_str = f"Epoch: {current_epoch}/{num_epochs}, Iter: {current_iteration}/{num_iterations} --"
 
         self.logger.info(" ".join([base_str, out_str]))
+
+
+class WVVStatsHandler(StatsHandler):
+    def __init__(self,
+                 epoch_print_logger: Optional[Callable[[Engine], Any]] = None,
+                 iteration_print_logger: Optional[
+                     Callable[[Engine], Any]] = None,
+                 output_transform: Callable = lambda x: x,
+                 global_epoch_transform: Callable = lambda x: x,
+                 name: Optional[str] = None,
+                 tag_name: str = DEFAULT_TAG,
+                 key_var_format: str = DEFAULT_KEY_VAL_FORMAT,
+                 logger_handler: Optional[logging.Handler] = None,
+                 log_file: str = "",
+                 ) -> None:
+        super(WVVStatsHandler, self).__init__(epoch_print_logger,
+                                              iteration_print_logger,
+                                              output_transform,
+                                              global_epoch_transform,
+                                              name,
+                                              tag_name,
+                                              key_var_format,
+                                              logger_handler)
+        self.log_file = log_file
+
+    def epoch_completed(self, engine: Engine) -> None:
+        """
+        Handler for train or validation/evaluation epoch completed Event.
+        Print epoch level log, default values are from Ignite state.metrics dict.
+
+        Args:
+            engine: Ignite Engine, it can be a trainer, validator or evaluator.
+
+        """
+        if self.epoch_print_logger is not None:
+            self.epoch_print_logger(engine)
+        else:
+            self._default_epoch_print(engine)
+
+    def _default_epoch_print(self, engine: Engine) -> None:
+        """
+        Execute epoch level log operation based on Ignite engine.state data.
+        print the values from Ignite state.metrics dict.
+
+        Args:
+            engine: Ignite Engine, it can be a trainer, validator or evaluator.
+
+        """
+        prints_dict = engine.state.metrics
+        if not prints_dict:
+            return
+        current_epoch = self.global_epoch_transform(engine.state.epoch)
+        [data_TP, data_FP, data_FN, data_precision, data_recall] = prints_dict['WVV']
+        if self.log_file != "":
+            try:
+                print("Adding results to csv at {}".format(self.log_file))
+                df = pd.read_csv(self.log_file, index_col=False)
+                df = df.append(
+                    {'epoch': current_epoch,
+                     'TP': data_TP.item(),
+                     'FP': data_FP.item(),
+                     'FN': data_FN.item(),
+                     'precision': data_precision.item(),
+                     'recall': data_recall.item()}, ignore_index=True)
+                df.to_csv(self.log_file, index=False)
+            except FileNotFoundError:
+                print("Can't find csv at {}, creating file".format(self.log_file))
+                df = pd.DataFrame(
+                    columns=['epoch', 'TP', 'FP', 'FN', 'precision', 'recall'])
+                df.to_csv(self.log_file, index=False)
+                df = df.append(
+                    {'epoch': current_epoch,
+                     'TP': data_TP.item(),
+                     'FP': data_FP.item(),
+                     'FN': data_FN.item(),
+                     'precision': data_precision.item(),
+                     'recall': data_recall.item()}, ignore_index=True)
+                df.to_csv(self.log_file, index=False)
+        prints_dict['WVV'] = data_precision
+        out_str = f"Epoch[{current_epoch}] Metrics -- "
+        for name in sorted(prints_dict):
+            value = prints_dict[name]
+            out_str += self.key_var_format.format(name, value)
+        self.logger.info(out_str)
+
+        if hasattr(engine.state, "key_metric_name"):
+            if hasattr(engine.state, "best_metric") and hasattr(engine.state,
+                                                                "best_metric_epoch"):
+                out_str = f"Key metric: {engine.state.key_metric_name} "
+                out_str += f"best value: {engine.state.best_metric} at epoch: {engine.state.best_metric_epoch}"
+        self.logger.info(out_str)
